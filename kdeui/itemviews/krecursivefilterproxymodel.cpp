@@ -126,7 +126,7 @@ void KRecursiveFilterProxyModelPrivate::sourceDataChanged(const QModelIndex &sou
 
   QModelIndex source_parent = source_top_left.parent();
 
-  if (!source_parent.isValid() || q->filterAcceptsRow(source_parent.row(), source_parent.parent()))
+  if (!source_parent.isValid() || q->acceptRow(source_parent.row(), source_parent.parent()))
   {
     invokeDataChanged(source_top_left, source_bottom_right);
     return;
@@ -149,24 +149,17 @@ void KRecursiveFilterProxyModelPrivate::sourceDataChanged(const QModelIndex &sou
 void KRecursiveFilterProxyModelPrivate::refreshAscendantMapping(const QModelIndex &index, bool refreshAll)
 {
   Q_Q(KRecursiveFilterProxyModel);
-
   Q_ASSERT(index.isValid());
-  QModelIndex lastAscendant = index;
-  QModelIndex sourceAscendant = index.parent();
+
+  QModelIndex sourceAscendant = index;
   // We got a matching descendant, so find the right place to insert the row.
   // We need to tell the QSortFilterProxyModel that the first child between an existing row in the model
   // has changed data so that it will get a mapping.
-  while(sourceAscendant.isValid() && !q->acceptRow(sourceAscendant.row(), sourceAscendant.parent()))
+  while(sourceAscendant.isValid())
   {
-    if (refreshAll)
-      invokeDataChanged(sourceAscendant, sourceAscendant);
-
-    lastAscendant = sourceAscendant;
+    invokeDataChanged(sourceAscendant, sourceAscendant);
     sourceAscendant = sourceAscendant.parent();
   }
-
-  // Inform the model that its data changed so that it creates new mappings and finds the rows which now match the filter.
-  invokeDataChanged(lastAscendant, lastAscendant);
 }
 
 void KRecursiveFilterProxyModelPrivate::sourceRowsAboutToBeInserted(const QModelIndex &source_parent, int start, int end)
