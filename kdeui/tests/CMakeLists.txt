@@ -82,7 +82,6 @@ KDEUI_PROXYMODEL_TESTS(
   kdescendantsproxymodeltest
   kselectionproxymodeltest
   testmodelqueuedconnections
-  krecursivefilterproxymodeltest
 )
 
 KDEUI_EXECUTABLE_TESTS(
