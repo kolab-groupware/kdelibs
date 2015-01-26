@@ -31,6 +31,26 @@
 // to be cleared, even if only a part of it is dirty.
 // Stephen Kelly, 30 April 2010.
 
+enum FilteringState { FilteringUnknown /* never in the map*/, FilteredIn, IndirectlyIn, Out };
+
+QDebug operator<<(QDebug dbg, FilteringState status) {
+    switch (status) {
+    case FilteringUnknown:
+        dbg << "Unknown";
+        break;
+    case FilteredIn:
+        dbg << "In";
+        break;
+    case IndirectlyIn:
+        dbg << "IndirectlyIn";
+        break;
+    case Out:
+        dbg << "Out";
+        break;
+    }
+    return dbg;
+}
+
 class KRecursiveFilterProxyModelPrivate
 {
   Q_DECLARE_PUBLIC(KRecursiveFilterProxyModel)
@@ -105,18 +125,19 @@ public:
   void sourceRowsInserted(const QModelIndex &source_parent, int start, int end);
   void sourceRowsAboutToBeRemoved(const QModelIndex &source_parent, int start, int end);
   void sourceRowsRemoved(const QModelIndex &source_parent, int start, int end);
+  void sourceLayoutChanged();
+  void sourceModelReset();
 
-  /**
-    Force QSortFilterProxyModel to re-evaluate whether to hide or show index and its parents.
-  */
-  void refreshAscendantMapping(const QModelIndex &index);
+  FilteringState filteringStatus(const QModelIndex &source_index);
+  void refreshAfterRemoval(const QModelIndex &source_parent);
 
-  QModelIndex lastFilteredOutAscendant(const QModelIndex &index);
+  void refreshLastFilteredOutAscendant(const QModelIndex &index);
 
   bool ignoreRemove;
   bool completeInsert;
 
-  QModelIndex lastHiddenAscendantForInsert;
+  // The index is always at column 0
+  QMap<QModelIndex, FilteringState> cache;
 };
 
 void KRecursiveFilterProxyModelPrivate::sourceDataChanged(const QModelIndex &source_top_left, const QModelIndex &source_bottom_right)
@@ -124,35 +145,54 @@ void KRecursiveFilterProxyModelPrivate::sourceDataChanged(const QModelIndex &sou
   QModelIndex source_parent = source_top_left.parent();
   Q_ASSERT(source_bottom_right.parent() == source_parent); // don't know how to handle different parents in this code...
 
+    // Compare with cache
+    for (int row = source_top_left.row(); row <= source_bottom_right.row(); ++row) {
+        const QModelIndex index = source_top_left.sibling(row, 0);
+        const FilteringState oldValue = cache.value(index, FilteringUnknown);
+        if (oldValue == IndirectlyIn) // that didn't change
+            continue;
+        if (oldValue == Out || oldValue == FilteredIn)
+            cache.remove(index);
+        const FilteringState newValue = filteringStatus(index); // update cache
+        if (oldValue != newValue) {
+            //qDebug() << index.data() << "went from" << oldValue << "to" << newValue;
+
+            if (newValue == Out) // treat this like row removal
+                refreshAfterRemoval(source_parent);
+            else if (newValue == FilteredIn || newValue == IndirectlyIn) { // treat this like row insertion
+                refreshLastFilteredOutAscendant(source_parent);
+            }
+        }
+    }
+
   // Tell the world.
   invokeDataChanged(source_top_left, source_bottom_right);
-
-  // We can't find out if the change really matters to us or not, for a lack of a dataAboutToBeChanged signal (or a cache).
-  // TODO: add a set of roles that we care for, so we can at least ignore the rest.
-
-  // Even if we knew the visibility was just toggled, we also can't find out what
-  // was the last filtered out ascendant (on show, like sourceRowsAboutToBeInserted does)
-  // or the last to-be-filtered-out ascendant (on hide, like sourceRowsRemoved does)
-  // So we have to refresh all parents.
-  QModelIndex sourceParent = source_parent;
-  while(sourceParent.isValid())
-  {
-    invokeDataChanged(sourceParent, sourceParent);
-    sourceParent = sourceParent.parent();
-  }
 }
 
-QModelIndex KRecursiveFilterProxyModelPrivate::lastFilteredOutAscendant(const QModelIndex &idx)
+void KRecursiveFilterProxyModelPrivate::refreshLastFilteredOutAscendant(const QModelIndex &idx)
 {
-    Q_Q(KRecursiveFilterProxyModel);
-    QModelIndex last = idx;
-    QModelIndex index = idx.parent();
-    while(index.isValid() && !q->filterAcceptsRow(index.row(), index.parent()))
+    //qDebug() << Q_FUNC_INFO << idx.data().toString();
+    QModelIndex last;
+    QModelIndex index = idx;
+    while(index.isValid())
     {
+        const FilteringState oldValue = cache.value(index, FilteringUnknown);
+        if (oldValue == IndirectlyIn || oldValue == Out) {
+            //qDebug() << "removed from cache" << index.data().toString();
+            cache.remove(index);
+        }
+        if (oldValue != Out) {
+            break;
+        }
+
         last = index;
         index = index.parent();
     }
-    return last;
+
+    if (last.isValid()) {
+        //qDebug() << "  dataChanged" << last.data().toString();
+        invokeDataChanged(last, last);
+    }
 }
 
 void KRecursiveFilterProxyModelPrivate::sourceRowsAboutToBeInserted(const QModelIndex &source_parent, int start, int end)
@@ -164,16 +204,21 @@ void KRecursiveFilterProxyModelPrivate::sourceRowsAboutToBeInserted(const QModel
     // If the parent is already in the model (directly or indirectly), we can just pass on the signal.
     invokeRowsAboutToBeInserted(source_parent, start, end);
     completeInsert = true;
-  } else {
-    // OK, so parent is not in the model.
-    // Maybe the grand parent neither.. Go up until the first one that is.
-    lastHiddenAscendantForInsert = lastFilteredOutAscendant(source_parent);
   }
 }
 
 void KRecursiveFilterProxyModelPrivate::sourceRowsInserted(const QModelIndex &source_parent, int start, int end)
 {
   Q_Q(KRecursiveFilterProxyModel);
+
+
+    // Clear cache due to the row-number offset, otherwise we'll use wrongly cached data
+    QAbstractItemModel *sourceModel = q->sourceModel();
+    for (int row = start ; row < sourceModel->rowCount(source_parent) ; ++row) {
+        const QModelIndex index = sourceModel->index(row, 0, source_parent);
+        //qDebug() << "Clearing cache for" << index.data().toString();
+        cache.remove(index);
+    }
 
   if (completeInsert)
   {
@@ -182,6 +227,7 @@ void KRecursiveFilterProxyModelPrivate::sourceRowsInserted(const QModelIndex &so
     invokeRowsInserted(source_parent, start, end);
     return;
   }
+
 
   bool requireRow = false;
   for (int row = start; row <= end; ++row)
@@ -199,8 +245,38 @@ void KRecursiveFilterProxyModelPrivate::sourceRowsInserted(const QModelIndex &so
     return;
   }
 
-  // Make QSFPM realize that lastHiddenAscendantForInsert should be shown now
-  invokeDataChanged(lastHiddenAscendantForInsert, lastHiddenAscendantForInsert);
+  //qDebug() << "refreshLastFilteredOutAscendant" << source_parent.data().toString();
+    refreshLastFilteredOutAscendant(source_parent);
+}
+
+void KRecursiveFilterProxyModelPrivate::refreshAfterRemoval(const QModelIndex &source_parent)
+{
+    Q_Q(KRecursiveFilterProxyModel);
+    // Find out if removing this visible row means that some ascendant
+    // row can now be hidden.
+    // We go up until we find a row that should still be visible
+    // and then make QSFPM re-evaluate the last one we saw before that, to hide it.
+
+    QModelIndex toHide;
+    QModelIndex index = source_parent;
+    while(index.isValid())
+    {
+        const FilteringState oldValue = cache.value(index, FilteringUnknown);
+        //qDebug() << "after removal:" << index.data().toString() << "was" << oldValue;
+        if (oldValue == IndirectlyIn || oldValue == FilteredIn) {
+            cache.remove(index);
+            if (q->filterAcceptsRow(index.row(), index.parent())) {
+                //qDebug() << "Now it's in";
+                break;
+            }
+        }
+        toHide = index;
+        index = index.parent();
+    }
+    if (toHide.isValid()) {
+        //qDebug() << "hiding" << toHide.data().toString();
+        invokeDataChanged(toHide, toHide);
+    }
 }
 
 void KRecursiveFilterProxyModelPrivate::sourceRowsAboutToBeRemoved(const QModelIndex &source_parent, int start, int end)
@@ -228,33 +304,63 @@ void KRecursiveFilterProxyModelPrivate::sourceRowsAboutToBeRemoved(const QModelI
 
 void KRecursiveFilterProxyModelPrivate::sourceRowsRemoved(const QModelIndex &source_parent, int start, int end)
 {
-  Q_Q(KRecursiveFilterProxyModel);
-
   if (ignoreRemove)
   {
     ignoreRemove = false;
     return;
   }
 
-  invokeRowsRemoved(source_parent, start, end);
+  Q_Q(KRecursiveFilterProxyModel);
 
-  // Find out if removing this visible row means that some ascendant
-  // row can now be hidden.
-  // We go up until we find a row that should still be visible
-  // and then make QSFPM re-evaluate the last one we saw before that, to hide it.
-
-  QModelIndex toHide;
-  QModelIndex sourceAscendant = source_parent;
-  while(sourceAscendant.isValid())
-  {
-    if (q->filterAcceptsRow(sourceAscendant.row(), sourceAscendant.parent())) {
-        break;
-    }
-    toHide = sourceAscendant;
-    sourceAscendant = sourceAscendant.parent();
+  // Clear cache due to the row-number offset, otherwise we'll use wrongly cached data
+  QAbstractItemModel *sourceModel = q->sourceModel();
+  for (int row = start ; row < sourceModel->rowCount(source_parent) ; ++row) {
+      const QModelIndex index = sourceModel->index(row, 0, source_parent);
+      cache.remove(index);
   }
-  if (toHide.isValid())
-      invokeDataChanged(toHide, toHide);
+
+  // TODO remove from the cache all the children of the removed rows....
+  //qDebug() << "sourceRowsRemoved" << source_parent.data() << start << end;
+  invokeRowsRemoved(source_parent, start, end);
+  refreshAfterRemoval(source_parent);
+}
+
+void KRecursiveFilterProxyModelPrivate::sourceLayoutChanged()
+{
+    cache.clear();
+}
+
+void KRecursiveFilterProxyModelPrivate::sourceModelReset()
+{
+    cache.clear();
+}
+
+FilteringState KRecursiveFilterProxyModelPrivate::filteringStatus(const QModelIndex &source_index)
+{
+    Q_Q(KRecursiveFilterProxyModel);
+
+    // Do not use the cache here, only write to it.
+    // This is because the filtering status of indexes can change without us being informed about it,
+    // e.g. due to setFilterFixedString().
+
+    if (q->acceptRow(source_index.row(), source_index.parent())) {
+        //qDebug() << "    writing cache (In) :" << source_index.data().toString() << FilteredIn;
+        cache.insert(source_index, FilteredIn);
+        return FilteredIn;
+    }
+
+    bool accepted = false;
+    for (int row = 0 ; row < source_index.model()->rowCount(source_index); ++row) {
+        if (q->filterAcceptsRow(row, source_index)) {
+            accepted = true;
+            break;
+        }
+    }
+
+    const FilteringState status = accepted ? IndirectlyIn : Out;
+    //qDebug() << "    writing cache:" << source_index.data().toString() << status;
+    cache.insert(source_index, status);
+    return status;
 }
 
 KRecursiveFilterProxyModel::KRecursiveFilterProxyModel(QObject* parent)
@@ -270,23 +376,10 @@ KRecursiveFilterProxyModel::~KRecursiveFilterProxyModel()
 
 bool KRecursiveFilterProxyModel::filterAcceptsRow(int sourceRow, const QModelIndex& sourceParent) const
 {
-  // TODO: Implement some caching so that if one match is found on the first pass, we can return early results
-  // when the subtrees are checked by QSFPM.
-  if (acceptRow(sourceRow, sourceParent))
-    return true;
+    QModelIndex source_index = sourceModel()->index(sourceRow, 0, sourceParent);
+    Q_ASSERT(source_index.isValid());
 
-  QModelIndex source_index = sourceModel()->index(sourceRow, 0, sourceParent);
-  Q_ASSERT(source_index.isValid());
-  bool accepted = false;
-
-  for (int row = 0 ; row < sourceModel()->rowCount(source_index); ++row) {
-    if (filterAcceptsRow(row, source_index)) {
-      accepted = true;
-      break;
-    }
-  }
-
-  return accepted;
+    return d_ptr->filteringStatus(source_index) != Out;
 }
 
 QModelIndexList KRecursiveFilterProxyModel::match( const QModelIndex& start, int role, const QVariant& value, int hits, Qt::MatchFlags flags ) const
@@ -327,6 +420,12 @@ void KRecursiveFilterProxyModel::setSourceModel(QAbstractItemModel* model)
 
   disconnect(model, SIGNAL(rowsRemoved(QModelIndex,int,int)),
       this, SLOT(sourceRowsRemoved(QModelIndex,int,int)));
+
+  disconnect(model, SIGNAL(layoutChanged()),
+      this, SLOT(sourceLayoutChanged()));
+
+  disconnect(model, SIGNAL(modelReset()),
+      this, SLOT(sourceModelReset()));
 
   QSortFilterProxyModel::setSourceModel(model);
 
@@ -425,6 +524,11 @@ void KRecursiveFilterProxyModel::setSourceModel(QAbstractItemModel* model)
   connect(model, SIGNAL(rowsRemoved(QModelIndex,int,int)),
       this, SLOT(sourceRowsRemoved(QModelIndex,int,int)));
 
+  connect(model, SIGNAL(layoutChanged()),
+      this, SLOT(sourceLayoutChanged()));
+
+  connect(model, SIGNAL(modelReset()),
+      this, SLOT(sourceModelReset()));
 }
 
 #include "krecursivefilterproxymodel.moc"

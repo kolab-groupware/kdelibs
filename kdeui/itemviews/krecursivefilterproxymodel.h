@@ -129,6 +129,9 @@ private:
   Q_PRIVATE_SLOT(d_func(), void sourceRowsInserted(const QModelIndex &source_parent, int start, int end))
   Q_PRIVATE_SLOT(d_func(), void sourceRowsAboutToBeRemoved(const QModelIndex &source_parent, int start, int end))
   Q_PRIVATE_SLOT(d_func(), void sourceRowsRemoved(const QModelIndex &source_parent, int start, int end))
+  Q_PRIVATE_SLOT(d_func(), void sourceLayoutChanged())
+  Q_PRIVATE_SLOT(d_func(), void sourceModelReset())
+
   //@endcond
 };
 
